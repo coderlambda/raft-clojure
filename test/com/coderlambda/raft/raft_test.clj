@@ -1,6 +1,6 @@
-(ns clojure-raft.raft-test
+(ns com.coderlambda.raft.raft-test
   (:require [clojure.test :refer :all]
-            [clojure-raft.raft :refer :all]
+            [com.coderlambda.raft.raft :refer :all]
             [clojure.core.async :as async :refer [timeout chan go >! <! close! <!!]]))
 
 (deftest test-gen-vote-request
@@ -251,7 +251,6 @@
        (<! (timeout 2000))
        (println "send stop message to all nodes")
        (doseq [config configs]
-         (<! (timeout 100))
          (>! (:channel config) stop-message))))
     (close-channels [get configs 0])))
 

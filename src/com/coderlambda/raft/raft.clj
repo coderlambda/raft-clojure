@@ -1,6 +1,11 @@
 (ns com.coderlambda.raft.raft
   (:require [clojure.core.async :as async :refer [chan timeout go go-loop <! >!]]))
 
+(defn print-log [& args]
+  (locking *out*
+    (apply println args)))
+
+
 (defn running? [state]
   (= (:running-state state) :running))
 
@@ -45,8 +50,7 @@
 
 (defn broadcast-message [message config]
   (doseq [target (:cluster-info config)]
-    (if (not= (:id target) (:id config))
-      (go (>! (:channel target) message)))))
+    (go (>! (:channel target) message))))
 
 (defn send-message [message target config]
   (doseq [node (:cluster-info config)]
@@ -57,7 +61,7 @@
 ;; timers
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (defn gen-timeout []
-  (+ 150 (rand-int 150)))
+  (+ 300 (rand-int 150)))
 
 (defn set-election-timer [term config t]
   (go (<! (timeout t))
@@ -80,7 +84,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn become-follower [state config]
-  (println (:id config) "become follower")
+  (log (:id config) "become follower")
   (assoc state
          :role :follower
          :granted-vote-count 0
@@ -92,19 +96,17 @@
   (let [{:keys [current-term]} state
         {:keys [id cluster-info]} config
         new-term (+ current-term 1)]
-    (println (:id config) "become candadite at term" new-term)
+    (print-log (:id config) "become candadite at term" new-term)
     (assoc state
            :role :candidate
            :leader nil
-           :current-term new-term
-           :granted-vote-count 1
-           :vote-for (:id config))))
+           :vote-for nil
+           :current-term new-term)))
 
 (defn become-leader [state config]
-
   (let [{:keys [id cluster-info]} config
         next-index (count (:log state))]
-    (println (:id config) "become leader")
+    (print-log (:id config) "become leader")
     (assoc state
            :role :leader
            :leader id
@@ -142,7 +144,8 @@
         new-state (if (and (= term current-term) (= role :candidate))
                    (if (>= granted-vote-count quorum)
                      (become-leader old-state config)
-                     (become-candidate old-state config))
+                     (do (print-log id "election time out")
+                         (become-candidate old-state config)))
                    old-state)
         response  (if (and (= term current-term) (= role :candidate))
                     (case (:role new-state)
@@ -157,7 +160,8 @@
         current-time (System/currentTimeMillis)
         timeout? (<  (- (+ heartbeat-timestamp heartbeat-timeout) current-time) 0)
         new-state (if timeout?
-                    (become-candidate state config)
+                    (do (print-log id "heartbeat timeout")
+                        (become-candidate state config))
                     state)
         response (if timeout?
                    (gen-vote-request id new-state))]
@@ -203,12 +207,12 @@
                            :heartbeat-timestamp (System/currentTimeMillis))
                     state)]
     (if (:vote-granted response)
-      (println id "vote for" candidate-id)
-      (println id "current term is" current-term 
+      (print-log id "vote for" candidate-id)
+      (print-log id "current term is" current-term 
                ", has vote for" vote-for
                ", refuse the vote request from" (:candidate-id message) 
                "with term" (:term message)))
-    (struct handler-result state response candidate-id)))
+    (struct handler-result new-state response candidate-id)))
 
 (defn handle-vote-request-response [message old-state config]
   (let [{:keys [term vote-granted]} message
@@ -325,7 +329,7 @@
 (defn handle-add-log [message old-state config]
   (let [{:keys [entries]} message
         {:keys [id]} config
-        {:keys [role log]} old-state]
+        {:keys [leader role log]} old-state]
     (if (= role :leader)
       (let [next-index (count log)
             new-log (reduce conj log entries)
@@ -333,7 +337,7 @@
                              :log new-log)
             response (gen-append-entries-message id new-state next-index)]
         (struct handler-result new-state response nil))
-      (struct handler-result old-state nil nil))))
+      (struct handler-result old-state message leader))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -342,7 +346,7 @@
 (defn get-message-handler [message]
   (case (:type message)
     :stop (fn [message state config]
-            (println "loop stoped" state)
+            (print-log "loop stoped" state)
             (struct handler-result (assoc state :running-state :stop) nil nil))
     :election-timeout handle-election-timeout
     :heartbeat-check handle-heartbeat-check
@@ -385,7 +389,7 @@
                   handler (get-message-handler message)
                   is-heartbeat? (= (:type message) :heartbeat)
                   {:keys [new-state response target]} (handler message old-state config)]
-              (reset-timers is-heartbeat? new-state old-state config)
+              (reset-timers is-heartbeat? old-state new-state config)
               (if response
                 (if target
                   (send-message response target config)
