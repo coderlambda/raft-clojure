@@ -222,7 +222,7 @@
                                (chan)))
         quorum (+ 1 (quot count 2))]
     (map (fn [{:keys [id channel]}]
-           (struct config id channel cluster-info quorum (gen-timeout) 100))
+           (struct config id channel cluster-info quorum))
          cluster-info)))
 
 (defn close-channels [config]
@@ -237,21 +237,19 @@
                          :entries ['(println "hello world")]}
         state init-state]
     (doseq [config configs]
-      (raft config state))
-    (go
-      (<! (timeout 1000))
-      (println "append entries")
-      (doseq [config configs]
-        (>! (:channel config) add-log-message)
-        (>! (:channel config) add-log-message)
-        (>! (:channel config) add-log-message)))
+      (raft config (assoc state
+                     :heartbeat-timeout (gen-timeout))))
     (<!!
      (go
-       (println "wait for 2s")
-       (<! (timeout 2000))
+       (<! (timeout 1000))
+       (println "append entries")
+       (doseq [config configs]
+         (>! (:channel config) add-log-message))
+       (<! (timeout 1000))
        (println "send stop message to all nodes")
        (doseq [config configs]
          (>! (:channel config) stop-message))))
+    
     (close-channels [get configs 0])))
 
 (deftest test-raft

@@ -17,9 +17,7 @@
   :id
   :channel
   :cluster-info
-  :quorum
-  :heartbeat-timeout
-  :heartbeat-interval)
+  :quorum)
 
 (defstruct handler-result
   :new-state
@@ -46,7 +44,9 @@
                  :next-index {}
                  :match-index {}
                  ;; timer control states
-                 :heartbeat-timestamp 0})
+                 :heartbeat-timestamp 0
+                 :heartbeat-timeout 300
+                 :heartbeat-interval 250})
 
 (defn broadcast-message [message config]
   (doseq [target (:cluster-info config)]
@@ -74,8 +74,8 @@
       (>! (:channel config)
           {:type :heartbeat-check})))
 
-(defn set-heartbeat-timer [config]
-  (go (<! (timeout (:heartbeat-interval config)))
+(defn set-heartbeat-timer [config state]
+  (go (<! (timeout (:heartbeat-interval state)))
       (>! (:channel config)
           {:type :heartbeat})))
 
@@ -84,7 +84,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn become-follower [state config]
-  (log (:id config) "become follower")
+  (print-log (:id config) "become follower")
   (assoc state
          :role :follower
          :granted-vote-count 0
@@ -155,8 +155,8 @@
     (struct handler-result new-state response nil)))
 
 (defn handle-heartbeat-check [message state config]
-  (let [{:keys [heartbeat-timeout id]} config
-        {:keys [heartbeat-timestamp role current-term]} state
+  (let [{:keys [id]} config
+        {:keys [heartbeat-timeout heartbeat-timestamp role current-term]} state
         current-time (System/currentTimeMillis)
         timeout? (<  (- (+ heartbeat-timestamp heartbeat-timeout) current-time) 0)
         new-state (if timeout?
@@ -183,10 +183,10 @@
     old-state))
 
 (defn handle-vote-request [message old-state config]
-  (let [{:keys [id heartbeat-timeout]} config
+  (let [{:keys [id]} config
         {:keys [term candidate-id last-log-index last-log-term]} message
         state (handle-message-term-bigger-than-current message old-state config)
-        {:keys [current-term vote-for log]} state
+        {:keys [heartbeat-timeout current-term vote-for log]} state
         vote-granted? (if (and (not vote-for)
                                (= term current-term))
                         (let [last-log (last log)]
@@ -253,7 +253,6 @@
                            :log entries
                            :commit-index -1
                            :last-applied -1)
-                        
                     (and (< prev-log-index (count log))
                          (= prev-log-term (:term (nth log prev-log-index))))
                     (let [log (reduce conj (subvec log 0 (inc prev-log-index)) entries)
@@ -365,23 +364,23 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (defn start-init-timers [state config]
   (case (:role state)
-    :follower (set-heartbeat-check-timer config (:heartbeat-timeout config))
+    :follower (set-heartbeat-check-timer config (:heartbeat-timeout state))
     :candidate (set-election-timer (:current-term state) config (gen-timeout))
-    :leader (set-heartbeat-timer config)))
+    :leader (set-heartbeat-timer config state)))
 
 (defn reset-timers [is-heartbeat? old-state new-state config]
   (case (:role new-state)
     :follower (if (not= (:current-term old-state) (:current-term new-state))
-                (set-heartbeat-check-timer config (:heartbeat-timeout config)))
+                (set-heartbeat-check-timer config (:heartbeat-timeout new-state)))
     :candidate (if (not= (:current-term old-state) (:current-term new-state))
                 (set-election-timer (:current-term new-state) config (gen-timeout)))
     :leader (if (or is-heartbeat?
                     (= (:role old-state) :candidate))
-              (set-heartbeat-timer config))))
+              (set-heartbeat-timer config new-state))))
 
 (defn raft [config state]
-  (let [{:keys [id]} config
-        {:keys [channel heartbeat-timeout id]} config] 
+  (let [{:keys [id channel id]} config
+        {:keys [heartbeat-timeout]} state] 
     (start-init-timers state config)
     (go (loop [old-state state]
           (when (= (:running-state old-state) :running)
